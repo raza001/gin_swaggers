@@ -1,4 +1,4 @@
-module gin-swagger
+module github.com/raza001/gin_swaggers
 
 go 1.24.3
 
