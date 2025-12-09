@@ -1,26 +1,24 @@
 package gin_swagger
 
 import (
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
+	// Importing docs is optional; the example main imports docs to set metadata.
+	// If you generate docs with swag init, make sure module path matches.
 )
 
 // Config holds all options for swagger protection & route.
 type Config struct {
-	// If false, the swagger route will always return 403.
-	Enabled bool
-
-	// Path for swagger route: e.g. "/swagger/*any"
-	// If empty, default is "/swagger/*any".
-	Path string
-
-	// Optional list of allowed client IPs.
-	AllowedIPs []string
-
-	// Optional static token for header-based auth:
-	// Client must send:  X-API-TOKEN: <AuthToken>
-	AuthToken string
+	Enabled        bool     // If false, swagger route will always return 403.
+	Path           string   // Path for swagger route: e.g. "/swagger/*any"
+	AllowedIPs     []string // Optional list of allowed client IPs or CIDR (e.g. "192.168.0.0/16")
+	AuthToken      string   // Optional static token header X-API-TOKEN
+	ProtectDocJSON bool     // If true, /swagger/doc.json is protected by middleware as well
 }
 
 // Option function for functional options pattern.
@@ -33,7 +31,7 @@ func WithPath(path string) Option {
 	}
 }
 
-// WithAllowedIPs sets list of allowed IPs.
+// WithAllowedIPs sets list of allowed IPs/CIDRs.
 func WithAllowedIPs(ips ...string) Option {
 	return func(c *Config) {
 		c.AllowedIPs = ips
@@ -54,16 +52,44 @@ func WithEnabled(enabled bool) Option {
 	}
 }
 
-// defaultConfig makes a baseline config.
-func defaultConfig() *Config {
-	return &Config{
-		Enabled: true,
-		Path:    "/swagger/*any",
+// WithProtectDocJSON sets whether the swagger JSON (doc.json) is protected.
+func WithProtectDocJSON(protect bool) Option {
+	return func(c *Config) {
+		c.ProtectDocJSON = protect
 	}
 }
 
+// defaultConfig makes a baseline config.
+func defaultConfig() *Config {
+	return &Config{
+		Enabled:        true,
+		Path:           "/swagger/*any",
+		ProtectDocJSON: false,
+	}
+}
+
+// parseAllowed converts AllowedIPs strings into two lists: individual IPs and CIDRs.
+func parseAllowed(allowed []string) (ips []net.IP, cidrs []*net.IPNet) {
+	for _, entry := range allowed {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			if _, netw, err := net.ParseCIDR(entry); err == nil {
+				cidrs = append(cidrs, netw)
+				continue
+			}
+			// fallthrough to parse as single IP if CIDR parsing fails
+		}
+		if ip := net.ParseIP(entry); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
+	return
+}
+
 // NewMiddleware creates a gin.HandlerFunc from a Config.
-// You can use this directly if you want to plug it yourself.
 func NewMiddleware(cfg *Config) gin.HandlerFunc {
 	if cfg == nil {
 		cfg = defaultConfig()
@@ -71,6 +97,8 @@ func NewMiddleware(cfg *Config) gin.HandlerFunc {
 	if cfg.Path == "" {
 		cfg.Path = "/swagger/*any"
 	}
+
+	ips, cidrs := parseAllowed(cfg.AllowedIPs)
 
 	return func(c *gin.Context) {
 		// 1. Disabled?
@@ -83,12 +111,23 @@ func NewMiddleware(cfg *Config) gin.HandlerFunc {
 
 		// 2. IP allow list
 		if len(cfg.AllowedIPs) > 0 {
-			clientIP := c.ClientIP()
+			clientIPStr := c.ClientIP()
+			clientIP := net.ParseIP(clientIPStr)
 			allowed := false
-			for _, ip := range cfg.AllowedIPs {
-				if clientIP == ip {
-					allowed = true
-					break
+			if clientIP != nil {
+				for _, ip := range ips {
+					if ip.Equal(clientIP) {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					for _, n := range cidrs {
+						if n.Contains(clientIP) {
+							allowed = true
+							break
+						}
+					}
 				}
 			}
 			if !allowed {
@@ -114,19 +153,43 @@ func NewMiddleware(cfg *Config) gin.HandlerFunc {
 	}
 }
 
-// AttachSwagger is the GENERIC function you reuse in all projects.
-//
-// - router: any gin.IRouter (Engine, Group, etc.)
-// - handler: any gin.HandlerFunc (gin-swagger, Redoc, your own handler…)
-// - opts: functional options to configure behavior and path.
-func AttachSwagger(router gin.IRouter, handler gin.HandlerFunc, opts ...Option) {
+// AttachSwagger registers swagger UI & (optionally) doc.json with protection.
+func AttachSwagger(router gin.IRouter, opts ...Option) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
 	mw := NewMiddleware(cfg)
+	swaggerHandler := ginSwagger.WrapHandler(swaggerFiles.Handler)
 
-	// NOTE: Path must be like "/swagger/*any" for gin-swagger style handlers.
-	router.GET(cfg.Path, mw, handler)
+	// Register UI endpoints (GET/HEAD/OPTIONS)
+	router.Handle("GET", cfg.Path, mw, func(c *gin.Context) {
+		swaggerHandler(c)
+	})
+	router.Handle("HEAD", cfg.Path, mw, func(c *gin.Context) {
+		swaggerHandler(c)
+	})
+	router.Handle("OPTIONS", cfg.Path, mw, func(c *gin.Context) {
+		swaggerHandler(c)
+	})
+
+	// doc.json path used by gin-swagger is typically "/swagger/doc.json"
+	// We construct it from the path prefix (cfg.Path without the "/*any")
+	prefix := strings.TrimSuffix(cfg.Path, "/*any")
+	if prefix == "" {
+		prefix = "/"
+	}
+	docPath := prefix + "doc.json"
+
+	if cfg.ProtectDocJSON {
+		router.GET(docPath, mw, func(c *gin.Context) {
+			swaggerHandler(c)
+		})
+	} else {
+		// expose doc.json publicly so UI can fetch it even if UI is protected
+		router.GET(docPath, func(c *gin.Context) {
+			swaggerHandler(c)
+		})
+	}
 }
