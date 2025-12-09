@@ -44,14 +44,6 @@ go get github.com/raza001/gin_swagger
 gin_swagger.AttachSwagger(r, handler)
 ```
 
-## Configuration
-
-See provided Go source for full configuration details.
-
-## Contributors
-
-- You
-
 ## License
 
 MIT License (replace or update as needed)
