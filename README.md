@@ -35,7 +35,7 @@ It provides a configurable middleware (IP allowlist, static header token, enable
 Place this file in your Go project or install via:
 
 ```
-go get github.com/<you>/gin_swagger
+go get github.com/raza001/gin_swagger
 ```
 
 ## Usage
